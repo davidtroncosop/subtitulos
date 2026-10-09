@@ -1,0 +1,6 @@
+﻿node_modules/
+.wrangler/
+.dev.vars
+
+# Terminal Paste Image folder
+.cp-images/

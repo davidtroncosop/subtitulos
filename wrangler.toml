@@ -1,0 +1,37 @@
+name = "gemini-live-subtitles"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# index.html y demás estáticos se sirven desde ./public; el Worker solo atiende /ws/stream
+[assets]
+directory = "./public"
+
+[vars]
+# Modo si la página no indica otro: hybrid | translate | live | transcribe (ver src/worker.js)
+DEFAULT_MODE = "hybrid"
+# Modo hybrid: idioma del orador para la transcripción y modelo de texto que traduce.
+# Por defecto vía OpenRouter (secreto OPENROUTER_API_KEY) entre los proveedores rápidos de TRANSLATE_LLM_HOSTS,
+# eligiendo el de menor latencia. Con TRANSLATE_LLM_PROVIDER = "groq" usa Groq directo (GROQ_API_KEY).
+SOURCE_LANGUAGES = "en"
+TRANSLATE_LLM_MODEL = "openai/gpt-oss-120b"
+TRANSLATE_LLM_HOSTS = "groq,cerebras,sambanova"
+# Pausa mínima entre traducciones. 0 con OpenRouter; 2100 si se usa el plan gratis de Groq (30/min)
+TRANSLATE_MIN_INTERVAL_MS = "0"
+# Contexto que ayuda a transcribir bien la terminología del evento
+TRANSCRIBE_PROMPT = "Talk at the FIMS World Congress of Sports Medicine: sports injuries, anterior cruciate ligament, neuromuscular training, rehabilitation, cohort studies."
+# Idioma al que traducen los modos translate y live (ISO 639-1)
+TRANSLATE_TO = "es"
+TRANSLATE_MODEL = "gpt-realtime-translate"
+LIVE_MODEL = "gpt-live-1"
+
+# Modelo de transcripción en streaming de OpenAI (Realtime API). Ver https://developers.openai.com/api/docs/models
+TRANSCRIBE_MODEL = "gpt-live-transcribe"
+# minimal | low | medium | high | xhigh: menos demora = texto parcial antes, algo menos preciso
+TRANSCRIBE_DELAY = "minimal"
+# Idiomas esperados (ISO 639-1, separados por coma), p. ej. "es,en" si hay ponencias en inglés
+TRANSCRIBE_LANGUAGES = "es"
+
+# Secretos (NUNCA en este archivo):
+#   npx wrangler secret put OPENAI_API_KEY
+#   npx wrangler secret put ACCESS_TOKEN     (opcional; luego abre la URL con ?token=...)
+# En local van en .dev.vars (ver .dev.vars.example)

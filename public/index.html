@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Presentación con Subtítulos IA</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        html, body {
+            margin: 0;
+            height: 100%;
+            background: #000;
+            color: #fff;
+            font-family: system-ui, -apple-system, sans-serif;
+            overflow: hidden;
+        }
+
+        #main-container { position: relative; height: 100vh; }
+
+        /* La diapositiva ocupa toda la pantalla; los subtítulos van encima */
+        #stage-area {
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+        #stage-area.dragover { outline: 4px dashed #f38020; outline-offset: -12px; }
+
+        canvas { display: block; }
+
+        /* Cinta oscura semitransparente arriba de la diapositiva: dos líneas, el texto antiguo sale por arriba */
+        #caption-area {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: rgba(25, 25, 30, 0.72);
+            display: flex;
+            align-items: center;
+            padding: 0.35em 1.5rem;
+            pointer-events: none;
+        }
+        #caption-area:has(#subtitles:empty) { display: none; }
+        /* Con los controles ocultos tampoco se muestran las instrucciones ni mensajes de estado */
+        body.hide-controls #caption-area:has(#subtitles.idle) { display: none; }
+        #subtitles {
+            --line: 1.25;
+            font-size: clamp(1.2rem, 2.6vw, 2.8rem);
+            font-weight: 400;
+            color: #fff;
+            line-height: var(--line);
+            max-height: calc(2em * var(--line));
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            text-align: left;
+            width: 100%;
+        }
+        #subtitles.idle { color: #9a9aa8; font-size: clamp(1rem, 1.8vw, 1.6rem); }
+
+        .control-panel {
+            position: absolute;
+            bottom: 20px;
+            z-index: 1;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(20, 20, 25, 0.9);
+            padding: 10px 16px;
+            border-radius: 30px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            backdrop-filter: blur(10px);
+            border: 1px solid #333;
+            opacity: 0.15;
+            transition: opacity 0.3s ease;
+            white-space: nowrap;
+        }
+        .control-panel:hover, .control-panel:focus-within { opacity: 1; }
+        body.hide-controls .control-panel { display: none; }
+
+        .btn {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 20px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 0.9rem;
+            color: #fff;
+        }
+        .btn-primary { background: #f38020; }
+        .btn-dark { background: #2a2a35; }
+        .btn-success { background: #10b981; }
+        .btn-live { background: #ef4444; }
+        #page-indicator { color: #aaa; font-variant-numeric: tabular-nums; min-width: 4.5em; text-align: center; }
+        #status-dot { width: 10px; height: 10px; border-radius: 50%; background: #555; }
+        #status-dot.ok { background: #10b981; }
+        #status-dot.warn { background: #f59e0b; }
+        #file-input { display: none; }
+    </style>
+</head>
+<body>
+    <div id="main-container">
+        <div id="stage-area">
+            <canvas id="pdf-canvas"></canvas>
+
+            <div class="control-panel">
+                <button class="btn btn-primary" id="load-btn">📁 Cargar PDF</button>
+                <input type="file" id="file-input" accept="application/pdf">
+                <button class="btn btn-dark" id="prev-btn">◀</button>
+                <span id="page-indicator">– / –</span>
+                <button class="btn btn-dark" id="next-btn">▶</button>
+                <select class="btn btn-dark" id="mode-select" title="Idioma de quien habla">
+                    <option value="hybrid">⚡ Traducir al español</option>
+                    <option value="translate">🌐 Traducir (traductor OpenAI, más rápido)</option>
+                    <option value="live">🧠 Traducir con GPT-Live (prueba)</option>
+                    <option value="transcribe">🇪🇸 Orador en español (sin traducir)</option>
+                </select>
+                <button class="btn btn-success" id="stream-btn">🎙️ Iniciar micrófono</button>
+                <span id="status-dot" title="Estado de la conexión"></span>
+                <button class="btn btn-dark" id="fullscreen-btn" title="Pantalla completa (F)">⛶</button>
+                <button class="btn btn-dark" id="hide-btn" title="Ocultar controles (H o doble clic para volver a mostrarlos)">✕</button>
+            </div>
+        </div>
+
+        <div id="caption-area">
+            <div id="subtitles" class="idle">Sube tus diapositivas en PDF (o arrástralas aquí) y activa el micrófono. Atajos: ← → avanzar · F pantalla completa · H ocultar controles</div>
+        </div>
+    </div>
+
+    <script>
+    // ---------------------------------------------------------------- PDF
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    const stage = document.getElementById('stage-area');
+    const canvas = document.getElementById('pdf-canvas');
+    const ctx = canvas.getContext('2d');
+    const pageIndicator = document.getElementById('page-indicator');
+
+    let pdfDoc = null;
+    let activePage = 1;
+    let renderTask = null;
+
+    async function loadPdf(file) {
+        if (!file || file.type !== 'application/pdf') return;
+        const data = new Uint8Array(await file.arrayBuffer());
+        pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+        activePage = 1;
+        renderPage();
+        // Las instrucciones ya no hacen falta: despejar la diapositiva.
+        if (subtitles.classList.contains('idle') && !streaming) subtitles.textContent = '';
+    }
+
+    // Ajusta la página al área disponible y renderiza a la resolución física del proyector.
+    async function renderPage() {
+        if (!pdfDoc) return;
+        pageIndicator.textContent = `${activePage} / ${pdfDoc.numPages}`;
+        const page = await pdfDoc.getPage(activePage);
+
+        const base = page.getViewport({ scale: 1 });
+        const fit = Math.min(stage.clientWidth / base.width, stage.clientHeight / base.height);
+        const dpr = window.devicePixelRatio || 1;
+        const viewport = page.getViewport({ scale: fit * dpr });
+
+        if (renderTask) renderTask.cancel();
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        canvas.style.width = `${Math.floor(viewport.width / dpr)}px`;
+        canvas.style.height = `${Math.floor(viewport.height / dpr)}px`;
+
+        renderTask = page.render({ canvasContext: ctx, viewport });
+        try {
+            await renderTask.promise;
+        } catch (err) {
+            if (err?.name !== 'RenderingCancelledException') console.error(err);
+        }
+    }
+
+    function navigate(direction) {
+        if (!pdfDoc) return;
+        const target = activePage + direction;
+        if (target >= 1 && target <= pdfDoc.numPages) {
+            activePage = target;
+            renderPage();
+        }
+    }
+
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(renderPage, 150);
+    });
+
+    const fileInput = document.getElementById('file-input');
+    document.getElementById('load-btn').onclick = () => fileInput.click();
+    fileInput.onchange = () => loadPdf(fileInput.files[0]);
+    document.getElementById('prev-btn').onclick = () => navigate(-1);
+    document.getElementById('next-btn').onclick = () => navigate(1);
+
+    function toggleFullscreen() {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else document.documentElement.requestFullscreen();
+    }
+    document.getElementById('fullscreen-btn').onclick = toggleFullscreen;
+
+    const toggleControls = () => document.body.classList.toggle('hide-controls');
+    document.getElementById('hide-btn').onclick = toggleControls;
+    stage.addEventListener('dblclick', toggleControls);
+
+    stage.addEventListener('dragover', (e) => { e.preventDefault(); stage.classList.add('dragover'); });
+    stage.addEventListener('dragleave', () => stage.classList.remove('dragover'));
+    stage.addEventListener('drop', (e) => {
+        e.preventDefault();
+        stage.classList.remove('dragover');
+        loadPdf(e.dataTransfer.files[0]);
+    });
+
+    // Flechas, espacio y PageUp/PageDown (lo que envían los punteros/clickers de presentación).
+    window.addEventListener('keydown', (e) => {
+        if (e.target.tagName === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) return;
+        switch (e.key) {
+            case 'ArrowRight': case 'PageDown': case ' ': navigate(1); e.preventDefault(); break;
+            case 'ArrowLeft': case 'PageUp': navigate(-1); e.preventDefault(); break;
+            case 'f': case 'F': toggleFullscreen(); break;
+            case 'h': case 'H': toggleControls(); break;
+        }
+    });
+
+    // ---------------------------------------------------------------- Subtítulos
+    const subtitles = document.getElementById('subtitles');
+    const MAX_CAPTION_CHARS = 400;
+    const MAX_SEGMENTS = 6;
+    const CLEAR_AFTER_MS = 7000;
+    // Cada frase (item) crece con deltas parciales y se reemplaza por el texto final al cerrarse.
+    // Se indexa por item porque los finales pueden llegar fuera de orden.
+    let segments = new Map();
+    let clearTimer;
+
+    function updateCaption(item, text, isFinal) {
+        subtitles.classList.remove('idle');
+        segments.set(item, isFinal ? text : (segments.get(item) || '') + text);
+        while (segments.size > MAX_SEGMENTS) segments.delete(segments.keys().next().value);
+
+        let captionText = [...segments.values()].join(' ').replace(/\s+/g, ' ').trim();
+        if (captionText.length > MAX_CAPTION_CHARS) {
+            captionText = captionText.slice(-MAX_CAPTION_CHARS).replace(/^\S*\s/, '');
+        }
+        subtitles.textContent = captionText;
+        clearTimeout(clearTimer);
+        clearTimer = setTimeout(() => { segments.clear(); subtitles.textContent = ''; }, CLEAR_AFTER_MS);
+    }
+
+    // Modo hybrid: cada traducción terminada entra en una cola y se muestra completa (en trozos de hasta
+    // dos líneas) durante un tiempo mínimo de lectura antes de dar paso a la siguiente.
+    const CHUNK_CHARS = 130;          // ~2 líneas de subtítulo; más largo se divide en partes parecidas
+    const READ_MS_PER_CHAR = 50;      // ~20 caracteres/s, ritmo de lectura de subtítulos profesionales
+    const MIN_READ_MS = 1500;
+    const MAX_READ_MS = 6000;
+    const BACKLOG_MIN_READ_MS = 1200; // con varias en cola se acorta para no quedar atrás del orador
+    const captionQueue = [];
+    let captionShown = null;          // { at, ms } del trozo en pantalla
+    let captionTimer = null;
+    let readyChunk = 0;
+
+    // Divide en trozos de largo parecido (sin colas cortas sueltas), cortando tras un punto o coma
+    // cercano al punto ideal; si no hay, en el espacio más cercano.
+    function splitCaption(text) {
+        const chunks = [];
+        let rest = text.replace(/\s+/g, ' ').trim();
+        while (rest.length > CHUNK_CHARS) {
+            // Se recalcula en cada vuelta: un corte en un punto puede dejar el resto aún muy largo.
+            const target = rest.length / Math.ceil(rest.length / CHUNK_CHARS);
+            let cut = -1;
+            for (const m of rest.matchAll(/[.?!;:,] /g)) {
+                if (m.index < CHUNK_CHARS && m.index > target * 0.5 && (cut < 0 || Math.abs(m.index - target) < Math.abs(cut - target))) cut = m.index + 1;
+            }
+            if (cut < 0) {
+                const before = rest.lastIndexOf(' ', target);
+                const after = rest.indexOf(' ', target);
+                cut = before < 0 || (after >= 0 && after - target < target - before) ? after : before;
+            }
+            if (cut <= 0) break;
+            chunks.push(rest.slice(0, cut).trim());
+            rest = rest.slice(cut).trim();
+        }
+        if (rest) chunks.push(rest);
+        return chunks;
+    }
+
+    function enqueueCaption(text) {
+        captionQueue.push(...splitCaption(text));
+        showNextCaption();
+    }
+
+    // Tiempo de lectura del trozo en pantalla; se recalcula al llegar más traducciones, y si se
+    // acumulan varias en cola se reparte el tiempo (la anterior sigue visible en la línea de arriba).
+    function readMs(chars) {
+        const ms = Math.min(MAX_READ_MS, Math.max(MIN_READ_MS, chars * READ_MS_PER_CHAR));
+        return captionQueue.length > 1 ? Math.max(BACKLOG_MIN_READ_MS, ms / captionQueue.length) : ms;
+    }
+
+    function showNextCaption() {
+        clearTimeout(captionTimer);
+        captionTimer = null;
+        if (!captionQueue.length) return;
+        const wait = captionShown ? captionShown.at + readMs(captionShown.chars) - Date.now() : 0;
+        if (wait > 0) {
+            captionTimer = setTimeout(showNextCaption, wait);
+            return;
+        }
+        const chunk = captionQueue.shift();
+        // Se agrega como frase nueva: la anterior sube y sale por arriba cuando ya se leyó.
+        updateCaption(`q${readyChunk++}`, chunk, true);
+        captionShown = { at: Date.now(), chars: chunk.length };
+        showNextCaption();
+    }
+
+    function resetCaptionQueue() {
+        captionQueue.length = 0;
+        clearTimeout(captionTimer);
+        captionTimer = null;
+        captionShown = null;
+    }
+
+    function showStatus(text) {
+        subtitles.classList.add('idle');
+        subtitles.textContent = text;
+    }
+
+    // ---------------------------------------------------------------- Audio + WebSocket
+    const streamBtn = document.getElementById('stream-btn');
+    const statusDot = document.getElementById('status-dot');
+
+    // Worklet que baja la frecuencia nativa (44.1/48 kHz) a 24 kHz mono Int16 y emite bloques de 50 ms
+    // (bloques cortos = menos espera antes de que el audio salga hacia el servidor).
+    const WORKLET_SRC = `
+    class PcmDownsampler extends AudioWorkletProcessor {
+        constructor() {
+            super();
+            this.ratio = sampleRate / 24000;
+            this.acc = 0; this.accCount = 0; this.pos = 0;
+            this.out = new Int16Array(1200);
+            this.outLen = 0;
+        }
+        process(inputs) {
+            const input = inputs[0][0];
+            if (!input) return true;
+            for (let i = 0; i < input.length; i++) {
+                this.acc += input[i]; this.accCount++; this.pos++;
+                if (this.pos >= this.ratio) {
+                    this.pos -= this.ratio;
+                    const s = Math.max(-1, Math.min(1, this.acc / this.accCount));
+                    this.acc = 0; this.accCount = 0;
+                    this.out[this.outLen++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    if (this.outLen === this.out.length) {
+                        this.port.postMessage(this.out.buffer, [this.out.buffer]);
+                        this.out = new Int16Array(1200);
+                        this.outLen = 0;
+                    }
+                }
+            }
+            return true;
+        }
+    }
+    registerProcessor('pcm-downsampler', PcmDownsampler);`;
+
+    let streaming = false;
+    let mediaStream = null;
+    let audioCtx = null;
+    let ws = null;
+    let reconnectTimer = null;
+
+    function wsUrl() {
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const params = new URLSearchParams({ mode: modeSelect.value });
+        const token = new URLSearchParams(location.search).get('token');
+        if (token) params.set('token', token);
+        return `${proto}://${location.host}/ws/stream?${params}`;
+    }
+
+    // Idioma del orador: transcribir (español) o traducir al español (inglés). Se recuerda entre sesiones.
+    const modeSelect = document.getElementById('mode-select');
+    // Por defecto se traduce; la preferencia se guarda con otra clave para no heredar la del default anterior.
+    try { modeSelect.value = localStorage.getItem('subtitulos-modo-v4') || 'hybrid'; } catch {}
+    modeSelect.onchange = () => {
+        try { localStorage.setItem('subtitulos-modo-v4', modeSelect.value); } catch {}
+        modeSelect.blur(); // que las flechas vuelvan a mover diapositivas
+        // Al cerrar, onclose reconecta solo con el modo nuevo.
+        if (streaming) ws?.close();
+    };
+
+    let LiveTranslator, SentenceSplitter, workerTranslate, translator = null, sentences = null;
+    import('./hybrid.js').then((m) => ({ LiveTranslator, SentenceSplitter, workerTranslate } = m));
+
+    function connect() {
+        statusDot.className = 'warn';
+        ws = new WebSocket(wsUrl());
+        segments.clear(); // cada sesión numera sus frases desde cero
+        ws.binaryType = 'arraybuffer';
+
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'ready') {
+                statusDot.className = 'ok';
+                translator?.close();
+                translator = sentences = null;
+                if (modeSelect.value === 'hybrid') {
+                    const token = new URLSearchParams(location.search).get('token');
+                    translator = new LiveTranslator({
+                        translate: workerTranslate(location.origin, token),
+                        onText: (item, text) => enqueueCaption(text),
+                        minIntervalMs: msg.translateMinIntervalMs,
+                    });
+                    sentences = new SentenceSplitter((id, text) => translator.push(id, text, true));
+                }
+            }
+            // Modo hybrid: llega el texto original y se muestra su traducción, no el original. Solo se
+            // traducen oraciones terminadas, para no mostrar traducciones a medias que cambian mientras se leen.
+            else if (msg.source) {
+                if (msg.type === 'final') sentences?.final(msg.item, msg.text);
+                else sentences?.delta(msg.item, msg.text);
+            }
+            else if (msg.type === 'caption') updateCaption(msg.item, msg.text, false);
+            else if (msg.type === 'final') updateCaption(msg.item, msg.text, true);
+            else if (msg.type === 'error') console.warn('Servidor:', msg.message);
+        };
+
+        // Las sesiones de OpenAI tienen duración limitada: reconectar sin intervención del operador.
+        ws.onclose = () => {
+            statusDot.className = streaming ? 'warn' : '';
+            if (streaming) reconnectTimer = setTimeout(connect, 1000);
+        };
+    }
+
+    async function startStreaming() {
+        try {
+            mediaStream = await navigator.mediaDevices.getUserMedia({
+                audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            });
+        } catch (err) {
+            showStatus('No se pudo acceder al micrófono: ' + err.message);
+            return;
+        }
+
+        audioCtx = new AudioContext();
+        const workletUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+        await audioCtx.audioWorklet.addModule(workletUrl);
+        URL.revokeObjectURL(workletUrl);
+
+        const source = audioCtx.createMediaStreamSource(mediaStream);
+        const downsampler = new AudioWorkletNode(audioCtx, 'pcm-downsampler');
+        downsampler.port.onmessage = (e) => {
+            if (ws?.readyState === WebSocket.OPEN) ws.send(e.data);
+        };
+        source.connect(downsampler);
+
+        streaming = true;
+        connect();
+        streamBtn.textContent = '🔴 En vivo · Detener';
+        streamBtn.className = 'btn btn-live';
+        showStatus('Escuchando…');
+    }
+
+    function stopStreaming() {
+        streaming = false;
+        clearTimeout(reconnectTimer);
+        ws?.close();
+        mediaStream?.getTracks().forEach((t) => t.stop());
+        audioCtx?.close();
+        translator?.close();
+        resetCaptionQueue();
+        ws = mediaStream = audioCtx = translator = sentences = null;
+        statusDot.className = '';
+        streamBtn.textContent = '🎙️ Iniciar micrófono';
+        streamBtn.className = 'btn btn-success';
+        showStatus('Micrófono detenido.');
+    }
+
+    streamBtn.onclick = () => (streaming ? stopStreaming() : startStreaming());
+    </script>
+</body>
+</html>

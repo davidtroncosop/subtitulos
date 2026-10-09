@@ -1,0 +1,5 @@
+OPENAI_API_KEY=pega-tu-api-key-aqui
+# Traducción del modo hybrid (por defecto vía OpenRouter)
+OPENROUTER_API_KEY=pega-tu-api-key-aqui
+# GROQ_API_KEY=solo-si-TRANSLATE_LLM_PROVIDER=groq
+# ACCESS_TOKEN=algo-secreto
