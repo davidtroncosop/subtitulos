@@ -245,11 +245,12 @@
     }
 
     function navigate(direction) {
-        // Si la diapositiva tiene un video que aún no se ha reproducido, avanzar primero lo inicia
-        // (como en PowerPoint con el clicker); la siguiente pulsación ya pasa de diapositiva.
+        // Si la diapositiva tiene un video sin terminar y en pausa (sin empezar o pausado a la mitad),
+        // avanzar primero lo inicia o reanuda (como en PowerPoint con el clicker); mientras se reproduce
+        // o cuando ya terminó, la pulsación pasa de diapositiva.
         // Cada visita vuelve a crear los <video>, así que al regresar se puede reproducir otra vez.
         if (direction > 0) {
-            const video = [...pptxHost.querySelectorAll('video')].find((v) => v.paused && !v.played.length);
+            const video = [...pptxHost.querySelectorAll('video')].find((v) => v.paused && !v.ended);
             if (video) {
                 video.play().catch((err) => console.error(err));
                 return;
