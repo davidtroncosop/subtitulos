@@ -14,9 +14,11 @@
             color: #fff;
             font-family: system-ui, -apple-system, sans-serif;
             overflow: hidden;
+            touch-action: manipulation; /* sin zoom por doble toque: el doble toque oculta los controles */
         }
 
-        #main-container { position: relative; height: 100vh; }
+        /* dvh: en el celular descuenta la barra de direcciones del navegador */
+        #main-container { position: relative; height: 100vh; height: 100dvh; }
 
         /* La diapositiva ocupa toda la pantalla; los subtítulos van encima */
         #stage-area {
@@ -64,7 +66,8 @@
             text-align: left;
             width: 100%;
         }
-        #subtitles.idle { color: #9a9aa8; font-size: clamp(1rem, 1.8vw, 1.6rem); }
+        /* Instrucciones y avisos: en el celular ocupan más de dos líneas y deben verse completos */
+        #subtitles.idle { color: #9a9aa8; font-size: clamp(1rem, 1.8vw, 1.6rem); max-height: none; }
 
         .control-panel {
             position: absolute;
@@ -105,6 +108,29 @@
         #status-dot.ok { background: #10b981; }
         #status-dot.warn { background: #f59e0b; }
         #file-input { display: none; }
+
+        /* Pantallas táctiles: sin hover, así que los controles se ven siempre (doble toque los oculta) */
+        @media (hover: none) {
+            .control-panel { opacity: 0.85; }
+        }
+        /* Pantallas angostas (celular, tablet): la barra completa mide ~1070 px, así que solo íconos
+           y, si aun así no cabe, dos filas */
+        @media (max-width: 1100px) {
+            .control-panel {
+                bottom: 8px;
+                gap: 6px;
+                padding: 6px 8px;
+                border-radius: 18px;
+                width: max-content;
+                max-width: calc(100% - 16px);
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+            .btn { padding: 8px 12px; }
+            .btn .label { display: none; }
+            #mode-select { max-width: 11em; }
+            #page-indicator { min-width: 3.5em; }
+        }
     </style>
 </head>
 <body>
@@ -114,7 +140,7 @@
             <canvas id="pdf-canvas"></canvas>
 
             <div class="control-panel">
-                <button class="btn btn-primary" id="load-btn">📁 Cargar PDF / PPTX</button>
+                <button class="btn btn-primary" id="load-btn">📁<span class="label"> Cargar PDF / PPTX</span></button>
                 <input type="file" id="file-input" accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation">
                 <button class="btn btn-dark" id="prev-btn">◀</button>
                 <span id="page-indicator">– / –</span>
@@ -125,7 +151,7 @@
                     <option value="live">🧠 Traducir con GPT-Live (prueba)</option>
                     <option value="transcribe">🇪🇸 Orador en español (sin traducir)</option>
                 </select>
-                <button class="btn btn-success" id="stream-btn">🎙️ Iniciar micrófono</button>
+                <button class="btn btn-success" id="stream-btn">🎙️<span class="label"> Iniciar micrófono</span></button>
                 <span id="status-dot" title="Estado de la conexión"></span>
                 <button class="btn btn-dark" id="fullscreen-btn" title="Pantalla completa (F)">⛶</button>
                 <button class="btn btn-dark" id="hide-btn" title="Ocultar controles (H o doble clic para volver a mostrarlos)">✕</button>
@@ -277,13 +303,44 @@
 
     function toggleFullscreen() {
         if (document.fullscreenElement) document.exitFullscreen();
-        else document.documentElement.requestFullscreen();
+        else document.documentElement.requestFullscreen?.().catch(() => {});
     }
-    document.getElementById('fullscreen-btn').onclick = toggleFullscreen;
+    const fullscreenBtn = document.getElementById('fullscreen-btn');
+    fullscreenBtn.onclick = toggleFullscreen;
+    // Safari en iPhone no permite pantalla completa de la página: mejor no mostrar el botón.
+    if (!document.documentElement.requestFullscreen) fullscreenBtn.hidden = true;
 
     const toggleControls = () => document.body.classList.toggle('hide-controls');
     document.getElementById('hide-btn').onclick = toggleControls;
     stage.addEventListener('dblclick', toggleControls);
+
+    // Celular: deslizar a la izquierda/derecha cambia de diapositiva y el doble toque oculta los controles
+    // (los navegadores móviles no siempre convierten el doble toque en dblclick).
+    let touchStart = null;
+    let lastTap = 0;
+    stage.addEventListener('touchstart', (e) => {
+        const ignore = e.touches.length > 1 || e.target.closest('.control-panel, video');
+        touchStart = ignore ? null : { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }, { passive: true });
+    stage.addEventListener('touchend', (e) => {
+        if (!touchStart) return;
+        const dx = e.changedTouches[0].clientX - touchStart.x;
+        const dy = e.changedTouches[0].clientY - touchStart.y;
+        touchStart = null;
+        if (Math.abs(dx) > 50 && Math.abs(dx) > 1.5 * Math.abs(dy)) {
+            navigate(dx < 0 ? 1 : -1);
+            lastTap = 0;
+        } else if (Math.abs(dx) < 15 && Math.abs(dy) < 15) {
+            const now = e.timeStamp;
+            if (now - lastTap < 350) {
+                toggleControls();
+                lastTap = 0;
+                e.preventDefault(); // evita el dblclick sintético, que lo volvería a alternar
+            } else {
+                lastTap = now;
+            }
+        }
+    });
 
     stage.addEventListener('dragover', (e) => { e.preventDefault(); stage.classList.add('dragover'); });
     stage.addEventListener('dragleave', () => stage.classList.remove('dragover'));
@@ -398,6 +455,12 @@
         clearTimeout(captionTimer);
         captionTimer = null;
         captionShown = null;
+    }
+
+    // En pantallas táctiles las instrucciones hablan de gestos en vez de teclas.
+    if (matchMedia('(pointer: coarse)').matches) {
+        subtitles.textContent = 'Sube tus diapositivas en PDF o PowerPoint .pptx y activa el micrófono. '
+            + 'Desliza ← → para avanzar · doble toque oculta los controles';
     }
 
     function showStatus(text) {
@@ -534,7 +597,7 @@
 
         streaming = true;
         connect();
-        streamBtn.textContent = '🔴 En vivo · Detener';
+        streamBtn.innerHTML = '🔴<span class="label"> En vivo · Detener</span>';
         streamBtn.className = 'btn btn-live';
         showStatus('Escuchando…');
     }
@@ -549,7 +612,7 @@
         resetCaptionQueue();
         ws = mediaStream = audioCtx = translator = sentences = null;
         statusDot.className = '';
-        streamBtn.textContent = '🎙️ Iniciar micrófono';
+        streamBtn.innerHTML = '🎙️<span class="label"> Iniciar micrófono</span>';
         streamBtn.className = 'btn btn-success';
         showStatus('Micrófono detenido.');
     }
