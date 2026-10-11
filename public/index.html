@@ -30,6 +30,11 @@
 
         canvas { display: block; }
 
+        /* PPTX: la librería dibuja la diapositiva en HTML a ancho fijo; se escala para ocupar el escenario */
+        #pptx-host { position: absolute; left: 50%; top: 50%; transform-origin: 0 0; }
+        #pptx-host:empty, #pptx-host:not(:empty) ~ canvas { display: none; }
+        #pptx-host .pptx-preview-slide-wrapper { margin: 0 !important; }
+
         /* Cinta oscura semitransparente arriba de la diapositiva: dos líneas, el texto antiguo sale por arriba */
         #caption-area {
             position: absolute;
@@ -105,11 +110,12 @@
 <body>
     <div id="main-container">
         <div id="stage-area">
+            <div id="pptx-host"></div>
             <canvas id="pdf-canvas"></canvas>
 
             <div class="control-panel">
-                <button class="btn btn-primary" id="load-btn">📁 Cargar PDF</button>
-                <input type="file" id="file-input" accept="application/pdf">
+                <button class="btn btn-primary" id="load-btn">📁 Cargar PDF / PPTX</button>
+                <input type="file" id="file-input" accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation">
                 <button class="btn btn-dark" id="prev-btn">◀</button>
                 <span id="page-indicator">– / –</span>
                 <button class="btn btn-dark" id="next-btn">▶</button>
@@ -127,7 +133,7 @@
         </div>
 
         <div id="caption-area">
-            <div id="subtitles" class="idle">Sube tus diapositivas en PDF (o arrástralas aquí) y activa el micrófono. Atajos: ← → avanzar · F pantalla completa · H ocultar controles</div>
+            <div id="subtitles" class="idle">Sube tus diapositivas en PDF o PowerPoint .pptx (o arrástralas aquí) y activa el micrófono. Atajos: ← → avanzar · F pantalla completa · H ocultar controles</div>
         </div>
     </div>
 
@@ -141,24 +147,82 @@
     const ctx = canvas.getContext('2d');
     const pageIndicator = document.getElementById('page-indicator');
 
+    const pptxHost = document.getElementById('pptx-host');
+
+    // Diapositivas cargadas: un PDF (pdfDoc) o un PPTX (pptxDeck); numPages vale para ambos.
     let pdfDoc = null;
+    let pptxDeck = null;
+    let numPages = 0;
     let activePage = 1;
     let renderTask = null;
 
-    async function loadPdf(file) {
-        if (!file || file.type !== 'application/pdf') return;
-        const data = new Uint8Array(await file.arrayBuffer());
-        pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+    async function loadSlides(file) {
+        if (!file) return;
+        const name = file.name.toLowerCase();
+        try {
+            if (file.type === 'application/pdf' || name.endsWith('.pdf')) {
+                const data = new Uint8Array(await file.arrayBuffer());
+                pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+                pptxDeck = null;
+                pptxHost.replaceChildren();
+                numPages = pdfDoc.numPages;
+            } else if (name.endsWith('.pptx')) {
+                pptxDeck = await loadPptx(await file.arrayBuffer());
+                pdfDoc = null;
+                numPages = pptxDeck.pptx.slides.length;
+            } else {
+                return;
+            }
+        } catch (err) {
+            console.error(err);
+            subtitles.className = 'idle';
+            subtitles.textContent = `No se pudo abrir ${file.name}: ${err.message || err}`;
+            return;
+        }
         activePage = 1;
         renderPage();
         // Las instrucciones ya no hacen falta: despejar la diapositiva.
         if (subtitles.classList.contains('idle') && !streaming) subtitles.textContent = '';
     }
 
+    // PPTX: pptx-preview reconstruye cada diapositiva en HTML a PPTX_WIDTH px de ancho (texto vectorial,
+    // nítido al escalar). No reproduce animaciones ni transiciones, y usa las fuentes instaladas en este equipo.
+    const PPTX_WIDTH = 1280;
+    // Build UMD autocontenido (~1,3 MB): solo se descarga la primera vez que se abre un PPTX.
+    let pptxLib = null;
+    function loadPptxLib() {
+        pptxLib ??= new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/pptx-preview@1.0.7/dist/pptx-preview.umd.js';
+            script.onload = () => resolve(window.pptxPreview);
+            script.onerror = () => { pptxLib = null; reject(new Error('no se pudo descargar el lector de PPTX')); };
+            document.head.append(script);
+        });
+        return pptxLib;
+    }
+    async function loadPptx(data) {
+        const { init } = await loadPptxLib();
+        const host = document.createElement('div');
+        const previewer = init(host, { width: PPTX_WIDTH, mode: 'list' });
+        const pptx = await previewer.load(data);
+        if (!pptx.slides.length) throw new Error('la presentación no tiene diapositivas');
+        pptxHost.replaceChildren(host);
+        return { previewer, pptx, height: PPTX_WIDTH * pptx.height / pptx.width };
+    }
+
+    function renderPptxSlide() {
+        const { previewer, height } = pptxDeck;
+        previewer.wrapper.replaceChildren();
+        previewer.renderSingleSlide(activePage - 1);
+        const fit = Math.min(stage.clientWidth / PPTX_WIDTH, stage.clientHeight / height);
+        pptxHost.style.transform = `scale(${fit}) translate(-50%, -50%)`;
+    }
+
     // Ajusta la página al área disponible y renderiza a la resolución física del proyector.
     async function renderPage() {
-        if (!pdfDoc) return;
-        pageIndicator.textContent = `${activePage} / ${pdfDoc.numPages}`;
+        if (!numPages) return;
+        pageIndicator.textContent = `${activePage} / ${numPages}`;
+        if (pptxDeck) return renderPptxSlide();
         const page = await pdfDoc.getPage(activePage);
 
         const base = page.getViewport({ scale: 1 });
@@ -181,9 +245,18 @@
     }
 
     function navigate(direction) {
-        if (!pdfDoc) return;
+        // Si la diapositiva tiene un video que aún no se ha reproducido, avanzar primero lo inicia
+        // (como en PowerPoint con el clicker); la siguiente pulsación ya pasa de diapositiva.
+        // Cada visita vuelve a crear los <video>, así que al regresar se puede reproducir otra vez.
+        if (direction > 0) {
+            const video = [...pptxHost.querySelectorAll('video')].find((v) => v.paused && !v.played.length);
+            if (video) {
+                video.play().catch((err) => console.error(err));
+                return;
+            }
+        }
         const target = activePage + direction;
-        if (target >= 1 && target <= pdfDoc.numPages) {
+        if (target >= 1 && target <= numPages) {
             activePage = target;
             renderPage();
         }
@@ -197,7 +270,7 @@
 
     const fileInput = document.getElementById('file-input');
     document.getElementById('load-btn').onclick = () => fileInput.click();
-    fileInput.onchange = () => loadPdf(fileInput.files[0]);
+    fileInput.onchange = () => loadSlides(fileInput.files[0]);
     document.getElementById('prev-btn').onclick = () => navigate(-1);
     document.getElementById('next-btn').onclick = () => navigate(1);
 
@@ -216,7 +289,7 @@
     stage.addEventListener('drop', (e) => {
         e.preventDefault();
         stage.classList.remove('dragover');
-        loadPdf(e.dataTransfer.files[0]);
+        loadSlides(e.dataTransfer.files[0]);
     });
 
     // Flechas, espacio y PageUp/PageDown (lo que envían los punteros/clickers de presentación).

@@ -1,6 +1,6 @@
 # Presentación con subtítulos IA (Cloudflare + OpenAI gpt-live-transcribe)
 
-PDF en canvas (PDF.js) + subtítulos en vivo: micrófono → PCM 24 kHz → Worker → OpenAI Realtime (`gpt-live-transcribe`, `delay: minimal`) → pantalla.
+PDF (PDF.js) o PPTX + subtítulos en vivo: micrófono → PCM 24 kHz → Worker → OpenAI Realtime (`gpt-live-transcribe`, `delay: minimal`) → pantalla.
 
 ## Local
 
@@ -27,7 +27,9 @@ npm run deploy                         # abre https://<worker>.workers.dev/?toke
 | F | Pantalla completa |
 | H / doble clic | Ocultar/mostrar controles |
 
-El PDF también se puede arrastrar sobre la zona de diapositivas. Si OpenAI cierra la sesión (tiene duración máxima), el cliente reconecta solo mientras el micrófono esté activo.
+El PDF o PPTX también se puede arrastrar sobre la zona de diapositivas.
+Los `.pptx` se dibujan en el navegador con [pptx-preview](https://www.npmjs.com/package/pptx-preview): sin animaciones ni transiciones,
+y con las fuentes instaladas en el equipo, así que si el diseño importa exporta a PDF. Si OpenAI cierra la sesión (tiene duración máxima), el cliente reconecta solo mientras el micrófono esté activo.
 
 ## Modos de subtítulos
 
